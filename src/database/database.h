@@ -143,9 +143,9 @@ int database_delete_list_iter(database_iterator_t *iter);
     for (int (element) = database_delete_list_iter(iter); (element) != 0; (element) = database_delete_list_iter(iter))
 
 
-void database_incremental_scan_begin(database_t *db);
+void database_incremental_scan_begin(database_t *db, int partial, FILE *list_file, const char *root);
 
-void database_incremental_scan_end(database_t *db);
+void database_incremental_scan_end(database_t *db, int partial);
 
 int database_mark_document(database_t *db, const char *id, int mtime);
 

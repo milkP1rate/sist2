@@ -56,7 +56,7 @@ void database_scan_begin(scan_args_t *args) {
         database_write_index_descriptor(db, original_desc);
         free(original_desc);
 
-        database_incremental_scan_begin(db);
+        database_incremental_scan_begin(db, args->partial, args->list_file, args->path);
 
     } else {
         // Create new descriptor
@@ -300,11 +300,11 @@ void sist2_scan(scan_args_t *args) {
     database_open(db);
 
     if (args->incremental != FALSE) {
-        database_incremental_scan_end(db);
+        database_incremental_scan_end(db, args->partial);
     }
 
-    if (args->no_stats) {
-        LOG_INFO("main.c", "Skipping stats generation (--no-stats)");
+    if (args->no_stats || args->partial) {
+        LOG_INFO("main.c", "Skipping stats generation (--no-stats or --partial)");
     } else {
         database_generate_stats(db, args->treemap_threshold);
     }
@@ -591,6 +591,9 @@ int main(int argc, const char *argv[]) {
             OPT_INTEGER(0, "job-timeout", &scan_args->job_timeout,
                         "Kill and restart a worker process that spends more than this many seconds on a single "
                         "file. DEFAULT: 0 (no timeout)"),
+            OPT_BOOLEAN(0, "partial", &scan_args->partial,
+                        "Process --list-file entries without pruning other documents. "
+                        "Requires --incremental and an existing database."),
             OPT_STRING(0, "list-file", &scan_args->list_path, "Specify a list of newline-delimited paths to be scanned"
                                                               " instead of normal directory traversal. Use '-' to read"
                                                               " from stdin."),

@@ -164,6 +164,12 @@ int scan_args_validate(scan_args_t *args, int argc, const char **argv) {
     }
     free(abs_output);
 
+    // Reject unsafe partial scans, including when an absent index resets incremental.
+    if (args->partial && (!args->incremental || !args->list_path || strcmp(args->list_path, "-") == 0)) {
+        fprintf(stderr, "--partial requires an existing database, --incremental, and a seekable --list-file (not stdin).\n");
+        return 1;
+    }
+
     if (args->depth <= 0) {
         args->depth = 2147483647;
     } else {

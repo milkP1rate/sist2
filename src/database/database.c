@@ -767,30 +767,114 @@ cJSON *database_document_iter(database_iterator_t *iter) {
     return NULL;
 }
 
-void database_incremental_scan_begin(database_t *db) {
+void database_incremental_scan_begin(database_t *db, int partial, FILE *list_file, const char *root) {
     LOG_DEBUG("database.c", "Preparing database for incremental scan");
     CRASH_IF_NOT_SQLITE_OK(sqlite3_exec(db->db, "DELETE FROM marked;", NULL, NULL, NULL));
-    LOG_DEBUG("database.c", "Preparing database for incremental scan (create marked table)");
-    CRASH_IF_NOT_SQLITE_OK(
-            sqlite3_exec(db->db, "INSERT INTO marked SELECT id, 0, mtime FROM document;", NULL, NULL, NULL));
+    if (!partial) {
+        LOG_DEBUG("database.c", "Preparing database for incremental scan (create marked table)");
+        CRASH_IF_NOT_SQLITE_OK(
+                sqlite3_exec(db->db, "INSERT INTO marked SELECT id, 0, mtime FROM document;", NULL, NULL, NULL));
+        return;
+    }
+
+    // For partial scans only explicitly listed documents and their archive descendants
+    // are deletion candidates. All other documents are entirely absent from 'marked'.
+    // The existing scan's mark-by-path and mark-by-id statements still work unchanged.
+    const char *sql =
+            "WITH RECURSIVE selected(id) AS ("
+            " SELECT id FROM document WHERE path=?1"
+            " UNION"
+            " SELECT d.id FROM document d JOIN selected p ON d.parent=p.id"
+            ") "
+            "INSERT OR IGNORE INTO marked (id, marked, mtime) "
+            "SELECT id, 0, mtime FROM document WHERE id IN (SELECT id FROM selected);";
+    sqlite3_stmt *stmt = NULL;
+    CRASH_IF_NOT_SQLITE_OK(sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL));
+
+    const size_t root_len = strlen(root);
+    char line[PATH_MAX];
+    while (fgets(line, sizeof(line), list_file) != NULL) {
+        size_t n = strlen(line);
+        if (n && line[n - 1] != '\n' && !feof(list_file)) {
+            LOG_FATALF("database.c", "--partial list path exceeds PATH_MAX");
+        }
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) {
+            continue;
+        }
+
+        // A missing listed file means DELETE. All other stat errors are fatal:
+        // a transient NAS error must never delete indexed data.
+        struct stat info;
+        int stat_ok = sist_stat(line, &info) == 0;
+        if (!stat_ok && errno != ENOENT) {
+            LOG_FATALF("database.c", "Cannot inspect --partial path %s (%s)", line, strerror(errno));
+        }
+        if (stat_ok && !S_ISREG(info.st_mode)) {
+            LOG_FATALF("database.c", "--partial list entry is not a regular file: %s", line);
+        }
+        char *canonical = stat_ok ? realpath(line, NULL) : NULL;
+        if (stat_ok && canonical == NULL) {
+            LOG_FATALF("database.c", "Cannot resolve --partial path %s (%s)", line, strerror(errno));
+        }
+        const char *absolute = canonical ? canonical : line;
+        if (strncmp(absolute, root, root_len) != 0 || absolute[root_len] == '\0') {
+            LOG_FATALF("database.c", "--partial path is outside scan root %s: %s", root, absolute);
+        }
+        // Do not let a missing path containing '..', '.', or empty components
+        // target a different document than its lexical spelling suggests.
+        const char *part = absolute + root_len;
+        for (const char *p = part; *p;) {
+            const char *slash = strchr(p, '/');
+            size_t len = slash ? (size_t)(slash - p) : strlen(p);
+            if (len == 0 || (len == 1 && p[0] == '.') ||
+                    (len == 2 && p[0] == '.' && p[1] == '.')) {
+                LOG_FATALF("database.c", "Unsafe --partial path: %s", absolute);
+            }
+            p = slash ? slash + 1 : p + len;
+            if (slash && *p == '\0') {
+                LOG_FATALF("database.c", "--partial expects files, not directories: %s", absolute);
+            }
+        }
+        sqlite3_bind_text(stmt, 1, part, -1, SQLITE_TRANSIENT);
+        CRASH_IF_STMT_FAIL(sqlite3_step(stmt));
+        CRASH_IF_NOT_SQLITE_OK(sqlite3_reset(stmt));
+        CRASH_IF_NOT_SQLITE_OK(sqlite3_clear_bindings(stmt));
+        free(canonical);
+    }
+    if (ferror(list_file)) {
+        LOG_FATALF("database.c", "Error reading --partial list file");
+    }
+    CRASH_IF_NOT_SQLITE_OK(sqlite3_finalize(stmt));
+    if (fseek(list_file, 0, SEEK_SET) != 0) {
+        LOG_FATALF("database.c", "Cannot rewind --partial list file");
+    }
 }
 
-void database_incremental_scan_end(database_t *db) {
+void database_incremental_scan_end(database_t *db, int partial) {
     database_flush_writes(db);
+
 
     // An archive that has not changed is never re-parsed, so the documents nested inside it are
     // never marked one by one. They are still in the index and still current, so anything below a
     // marked document is marked along with it.
-    CRASH_IF_NOT_SQLITE_OK(sqlite3_exec(
-            db->db,
+    // On partial scans, do not rescue old archive members when the archive
+    // itself was rewritten. A matching mtime signals an unchanged parent.
+    const char *descendants_sql = partial ?
+            "WITH RECURSIVE descendant(id) AS ("
+            "   SELECT d.id FROM document d INNER JOIN marked m ON m.id = d.parent AND m.marked = 1"
+            "   WHERE m.mtime=(SELECT p.mtime FROM document p WHERE p.id=m.id)"
+            "   UNION"
+            "   SELECT d.id FROM document d INNER JOIN descendant p ON d.parent = p.id"
+            ") "
+            "UPDATE marked SET marked = 1 WHERE id IN (SELECT id FROM descendant);" :
             "WITH RECURSIVE descendant(id) AS ("
             "   SELECT d.id FROM document d INNER JOIN marked m ON m.id = d.parent AND m.marked = 1"
             "   UNION"
             "   SELECT d.id FROM document d INNER JOIN descendant p ON d.parent = p.id"
             ") "
-            "UPDATE marked SET marked = 1 WHERE id IN (SELECT id FROM descendant);",
-            NULL, NULL, NULL
-    ));
+            "UPDATE marked SET marked = 1 WHERE id IN (SELECT id FROM descendant);";
+    CRASH_IF_NOT_SQLITE_OK(sqlite3_exec(db->db, descendants_sql, NULL, NULL, NULL));
 
     CRASH_IF_NOT_SQLITE_OK(sqlite3_exec(
             db->db,

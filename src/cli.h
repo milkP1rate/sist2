@@ -14,6 +14,8 @@ typedef struct scan_args {
     int content_size;
     int threads;
     int incremental;
+    /** Only scan --list-file entries; never prune unlisted documents. */
+    int partial;
     int optimize_database;
     char *output;
     char *rewrite_url;
