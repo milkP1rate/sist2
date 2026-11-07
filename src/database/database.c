@@ -796,7 +796,7 @@ void database_incremental_scan_begin(database_t *db, int partial, FILE *list_fil
     while (fgets(line, sizeof(line), list_file) != NULL) {
         size_t n = strlen(line);
         if (n && line[n - 1] != '\n' && !feof(list_file)) {
-            LOG_FATALF("database.c", "--partial list path exceeds PATH_MAX");
+            LOG_FATAL("database.c", "--partial list path exceeds PATH_MAX");
         }
         line[strcspn(line, "\r\n")] = '\0';
         if (!line[0]) {
@@ -843,11 +843,11 @@ void database_incremental_scan_begin(database_t *db, int partial, FILE *list_fil
         free(canonical);
     }
     if (ferror(list_file)) {
-        LOG_FATALF("database.c", "Error reading --partial list file");
+        LOG_FATAL("database.c", "Error reading --partial list file");
     }
     CRASH_IF_NOT_SQLITE_OK(sqlite3_finalize(stmt));
     if (fseek(list_file, 0, SEEK_SET) != 0) {
-        LOG_FATALF("database.c", "Cannot rewind --partial list file");
+        LOG_FATAL("database.c", "Cannot rewind --partial list file");
     }
 }
 
